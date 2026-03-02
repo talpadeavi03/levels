@@ -1,4 +1,3 @@
-#testing
 name: Level2 - Enterprise Pipeline (Build + Dev + Prod Approval)
 
 on:
