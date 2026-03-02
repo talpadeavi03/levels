@@ -1,4 +1,3 @@
-#testing
 name: Level2 - Branch Aware Deploy (Single EC2)
 
 on:
@@ -7,17 +6,29 @@ on:
       - main
       - dev
   workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "ECR image tag (commit SHA) to deploy. Leave empty to deploy latest."
+        required: false
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
 
 jobs:
-  build-and-deploy:
+
+  # =========================
+  # 🟢 BUILD JOB
+  # =========================
+  build:
     runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.set_tag.outputs.image_tag }}
 
     steps:
-      # Checkout repository
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Configure AWS credentials
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -25,88 +36,130 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      # Login to Amazon ECR
       - name: Login to Amazon ECR
         run: |
-          REGISTRY=$(echo $ECR_REPOSITORY | cut -d'/' -f1)
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          REGISTRY=$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
           aws ecr get-login-password --region $AWS_REGION | \
           docker login --username AWS --password-stdin $REGISTRY
-        env:
-          AWS_REGION: ${{ secrets.AWS_REGION }}
-          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
 
-      # Set image tag (commit SHA short)
       - name: Set image tag
-        run: echo "IMAGE_TAG=$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_ENV
+        id: set_tag
+        run: |
+          TAG=$(echo $GITHUB_SHA | cut -c1-7)
+          echo "image_tag=$TAG" >> $GITHUB_OUTPUT
 
-      # Build image
       - name: Build Docker image
-        run: docker build -t level2-node-app:$IMAGE_TAG .
+        run: docker build -t level2-node-app:${{ steps.set_tag.outputs.image_tag }} .
 
-      # Tag commit version
-      - name: Tag Docker image (commit)
-        run: docker tag level2-node-app:$IMAGE_TAG $ECR_REPOSITORY:$IMAGE_TAG
-        env:
-          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+      - name: Security Scan (Trivy)
+        uses: aquasecurity/trivy-action@0.20.0
+        with:
+          image-ref: level2-node-app:${{ steps.set_tag.outputs.image_tag }}
+          format: table
+          exit-code: 1
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
 
-      # Tag latest
-      - name: Tag Docker image (latest)
-        run: docker tag level2-node-app:$IMAGE_TAG $ECR_REPOSITORY:latest
-        env:
-          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+      - name: Tag image (commit)
+        run: docker tag level2-node-app:${{ steps.set_tag.outputs.image_tag }} $ECR_REPOSITORY:${{ steps.set_tag.outputs.image_tag }}
 
-      # Push commit tag
+      - name: Tag image (latest)
+        run: docker tag level2-node-app:${{ steps.set_tag.outputs.image_tag }} $ECR_REPOSITORY:latest
+
       - name: Push commit tag
-        run: docker push $ECR_REPOSITORY:$IMAGE_TAG
-        env:
-          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+        run: docker push $ECR_REPOSITORY:${{ steps.set_tag.outputs.image_tag }}
 
-      # Push latest tag
       - name: Push latest tag
         run: docker push $ECR_REPOSITORY:latest
-        env:
-          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
 
-      # Setup SSH agent
+
+  # =========================
+  # 🟡 DEV DEPLOY (AUTO)
+  # =========================
+  deploy-dev:
+    if: github.ref_name == 'dev'
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
       - name: Setup SSH agent
         uses: webfactory/ssh-agent@v0.8.0
         with:
           ssh-private-key: ${{ secrets.EC2_SSH_KEY }}
 
-      # Branch-aware deployment
-      - name: Deploy to EC2
+      - name: Deploy to EC2 (DEV)
         run: |
-          ssh -o StrictHostKeyChecking=no ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << EOF
+          ssh -o StrictHostKeyChecking=no \
+          ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << EOF
             set -e
 
-            ECR_REPO="${{ secrets.ECR_REPOSITORY }}"
-            REGISTRY=\$(echo \$ECR_REPO | cut -d'/' -f1)
-
-            echo "Logging into ECR..."
-            aws ecr get-login-password --region ap-south-1 | \
-            docker login --username AWS --password-stdin \$REGISTRY
-
-            echo "Pulling image..."
-            docker pull \$ECR_REPO:latest
-
-            if [ "${{ github.ref_name }}" = "dev" ]; then
-              echo "Deploying DEV container..."
-              docker rm -f level1-dev || true
-              docker run -d \
-                --name level1-dev \
-                --restart always \
-                -p 3001:3000 \
-                \$ECR_REPO:latest
-            else
-              echo "Deploying PROD container..."
-              docker rm -f level1-app || true
-              docker run -d \
-                --name level1-app \
-                --restart always \
-                -p 80:3000 \
-                \$ECR_REPO:latest
+            AWS_REGION=${AWS_REGION}
+            ECR_REPO="${ECR_REPOSITORY}"
+            IMAGE_TAG="${{ github.event.inputs.image_tag }}"
+            if [ -z "\$IMAGE_TAG" ]; then
+              IMAGE_TAG="${{ needs.build.outputs.image_tag }}"
             fi
 
+            REGISTRY=\$(echo \$ECR_REPO | cut -d'/' -f1)
+
+            aws ecr get-login-password --region \$AWS_REGION | \
+            docker login --username AWS --password-stdin \$REGISTRY
+
+            docker pull \$ECR_REPO:\$IMAGE_TAG
+
+            docker rm -f level1-dev || true
+            docker run -d \
+              --name level1-dev \
+              --restart always \
+              -p 3001:3000 \
+              \$ECR_REPO:\$IMAGE_TAG
+
             docker image prune -f
-            echo "Deployment completed."
+          EOF
+
+
+  # =========================
+  # 🔴 PROD DEPLOY (APPROVAL REQUIRED)
+  # =========================
+  deploy-prod:
+    if: github.ref_name == 'main'
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production   # 🔐 Approval gate here
+
+    steps:
+      - name: Setup SSH agent
+        uses: webfactory/ssh-agent@v0.8.0
+        with:
+          ssh-private-key: ${{ secrets.EC2_SSH_KEY }}
+
+      - name: Deploy to EC2 (PROD)
+        run: |
+          ssh -o StrictHostKeyChecking=no \
+          ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << EOF
+            set -e
+
+            AWS_REGION=${AWS_REGION}
+            ECR_REPO="${ECR_REPOSITORY}"
+            IMAGE_TAG="${{ github.event.inputs.image_tag }}"
+            if [ -z "\$IMAGE_TAG" ]; then
+              IMAGE_TAG="${{ needs.build.outputs.image_tag }}"
+            fi
+
+            REGISTRY=\$(echo \$ECR_REPO | cut -d'/' -f1)
+
+            aws ecr get-login-password --region \$AWS_REGION | \
+            docker login --username AWS --password-stdin \$REGISTRY
+
+            docker pull \$ECR_REPO:\$IMAGE_TAG
+
+            docker rm -f level1-app || true
+            docker run -d \
+              --name level1-app \
+              --restart always \
+              -p 80:3000 \
+              \$ECR_REPO:\$IMAGE_TAG
+
+            docker image prune -f
           EOF
