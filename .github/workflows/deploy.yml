@@ -38,22 +38,35 @@ jobs:
           AWS_REGION: ${{ secrets.AWS_REGION }}
           ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
 
+            # Set image tag based on commit SHA
+      - name: Set image tag
+        run: echo "IMAGE_TAG=${GITHUB_SHA::7}" >> $GITHUB_ENV
+
       # Build Docker image
       - name: Build Docker image
-        run: |
-          docker build -t level2-node-app:latest .
+        run: docker build -t level2-node-app:$IMAGE_TAG .
 
-      # Tag image for ECR
-      - name: Tag Docker image
-        run: |
-          docker tag level2-node-app:latest $ECR_REPOSITORY:latest
+      # Tag image for ECR (commit tag)
+      - name: Tag Docker image (commit)
+        run: docker tag level2-node-app:$IMAGE_TAG $ECR_REPOSITORY:$IMAGE_TAG
         env:
           ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
 
-      # Push image to ECR
-      - name: Push Docker image
-        run: |
-          docker push $ECR_REPOSITORY:latest
+      # Tag image as latest
+      - name: Tag Docker image (latest)
+        run: docker tag level2-node-app:$IMAGE_TAG $ECR_REPOSITORY:latest
+        env:
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+
+      # Push commit tag
+      - name: Push commit tag
+        run: docker push $ECR_REPOSITORY:$IMAGE_TAG
+        env:
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+
+      # Push latest tag
+      - name: Push latest tag
+        run: docker push $ECR_REPOSITORY:latest
         env:
           ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
 
