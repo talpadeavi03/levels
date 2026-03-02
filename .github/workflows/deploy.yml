@@ -11,10 +11,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # Checkout code
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Configure AWS credentials
+      # Configure AWS credentials for CI
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -22,15 +23,14 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      # Login to ECR
+      # Login to Amazon ECR (CI side)
       - name: Login to Amazon ECR
         run: |
           aws ecr get-login-password --region $AWS_REGION | \
-          docker login --username AWS --password-stdin $ECR_REPOSITORY
-
+          docker login --username AWS --password-stdin $ECR_REGISTRY
         env:
           AWS_REGION: ${{ secrets.AWS_REGION }}
-          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+          ECR_REGISTRY: ${{ secrets.ECR_REPOSITORY }}
 
       # Build Docker image
       - name: Build Docker image
@@ -51,34 +51,39 @@ jobs:
         env:
           ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
 
-      # Setup SSH agent
+      # Setup SSH agent for EC2 access
       - name: Setup SSH agent
         uses: webfactory/ssh-agent@v0.8.0
         with:
           ssh-private-key: ${{ secrets.EC2_SSH_KEY }}
 
-      # Deploy on EC2 (Pull from ECR)
+      # Deploy on EC2 (Pull image from ECR)
       - name: Deploy to EC2
         run: |
           ssh -o StrictHostKeyChecking=no ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'EOF'
             set -e
 
+            ECR_REPO="${{ secrets.ECR_REPOSITORY }}"
+
             echo "Logging into ECR from EC2..."
             aws ecr get-login-password --region ap-south-1 | \
-            docker login --username AWS --password-stdin 370292660341.dkr.ecr.ap-south-1.amazonaws.com
+            docker login --username AWS --password-stdin $(echo $ECR_REPO | cut -d'/' -f1)
 
-            echo "Pulling latest image..."
-            docker pull 370292660341.dkr.ecr.ap-south-1.amazonaws.com/level2-node-app:latest
+            echo "Pulling latest image from ECR..."
+            docker pull $ECR_REPO:latest
 
-            echo "Stopping old container..."
+            echo "Removing old container if exists..."
             docker rm -f level1-app || true
 
-            echo "Starting new container from ECR image..."
+            echo "Starting new container..."
             docker run -d \
               --name level1-app \
               --restart always \
               -p 80:3000 \
-              370292660341.dkr.ecr.ap-south-1.amazonaws.com/level2-node-app:latest
+              $ECR_REPO:latest
 
-            echo "Deployment complete."
+            echo "Cleaning unused images..."
+            docker image prune -f
+
+            echo "Deployment completed successfully."
           EOF
