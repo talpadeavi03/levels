@@ -1,0 +1,27 @@
+
+##List Instances
+aws ec2 describe-instances \
+  --query "Reservations[].Instances[].InstanceId"
+
+#variable
+INSTANCE_ID=nameofinstacnehere
+
+##add the --- name below to start it (for stop use stop)
+aws ec2 start-instances --instance-ids namehere
+
+##state of vm
+aws ec2 describe-instances \
+  --instance-ids $INSTANCE_ID \
+  --query "Reservations[].Instances[].State.Name"
+                 
+                  OR
+
+aws ec2 describe-instances \
+  --instance-ids $INSTANCE_ID \
+  --query "Reservations[].Instances[].State.Name" \
+  --output text
+
+##get public ip
+  aws ec2 describe-instances \
+  --instance-ids $INSTANCE_ID \
+  --query "Reservations[].Instances[].PublicIpAddress"
