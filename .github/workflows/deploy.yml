@@ -6,10 +6,15 @@ on:
       - main
       - dev
   workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "ECR image tag (commit SHA) to deploy. Leave empty to deploy latest."
+        required: false
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    environment: ${{ github.ref_name == 'main' && 'production' || '' }}
 
     env:
       AWS_REGION: ${{ secrets.AWS_REGION }}
@@ -28,7 +33,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      # 3️⃣ Login to Amazon ECR (CI side)
+      # 3️⃣ Login to Amazon ECR
       - name: Login to Amazon ECR
         run: |
           ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
@@ -41,11 +46,11 @@ jobs:
       - name: Set image tag
         run: echo "IMAGE_TAG=$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_ENV
 
-      # 5️⃣ Build Docker image
+      # 5️⃣ Build image
       - name: Build Docker image
         run: docker build -t level2-node-app:${{ env.IMAGE_TAG }} .
 
-      # 6️⃣ Scan image with Trivy (DevSecOps Gate)
+      # 6️⃣ Security Scan
       - name: Scan image for vulnerabilities (Trivy)
         uses: aquasecurity/trivy-action@0.20.0
         with:
@@ -55,11 +60,11 @@ jobs:
           ignore-unfixed: true
           severity: CRITICAL,HIGH
 
-      # 7️⃣ Tag image with commit SHA
+      # 7️⃣ Tag image (commit)
       - name: Tag image (commit)
         run: docker tag level2-node-app:${{ env.IMAGE_TAG }} $ECR_REPOSITORY:${{ env.IMAGE_TAG }}
 
-      # 8️⃣ Tag image as latest
+      # 8️⃣ Tag image (latest)
       - name: Tag image (latest)
         run: docker tag level2-node-app:${{ env.IMAGE_TAG }} $ECR_REPOSITORY:latest
 
@@ -67,7 +72,7 @@ jobs:
       - name: Push commit tag
         run: docker push $ECR_REPOSITORY:${{ env.IMAGE_TAG }}
 
-      # 🔟 Push latest tag
+      # 🔟 Push latest
       - name: Push latest tag
         run: docker push $ECR_REPOSITORY:latest
 
@@ -77,7 +82,7 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.EC2_SSH_KEY }}
 
-      # 1️⃣2️⃣ Branch-aware deployment
+      # 1️⃣2️⃣ Deploy (Branch-aware + Rollback capable)
       - name: Deploy to EC2
         run: |
           ssh -o StrictHostKeyChecking=no \
@@ -88,12 +93,20 @@ jobs:
             ECR_REPO="${ECR_REPOSITORY}"
             REGISTRY=\$(echo \$ECR_REPO | cut -d'/' -f1)
 
-            echo "Logging into ECR from EC2..."
+            # Determine image tag
+            IMAGE_TAG="${{ github.event.inputs.image_tag }}"
+            if [ -z "\$IMAGE_TAG" ]; then
+              IMAGE_TAG="latest"
+            fi
+
+            echo "Deploying image tag: \$IMAGE_TAG"
+
+            echo "Logging into ECR..."
             aws ecr get-login-password --region \$AWS_REGION | \
             docker login --username AWS --password-stdin \$REGISTRY
 
-            echo "Pulling latest image..."
-            docker pull \$ECR_REPO:latest
+            echo "Pulling image..."
+            docker pull \$ECR_REPO:\$IMAGE_TAG
 
             if [ "${{ github.ref_name }}" = "dev" ]; then
               echo "Deploying DEV container..."
@@ -102,7 +115,7 @@ jobs:
                 --name level1-dev \
                 --restart always \
                 -p 3001:3000 \
-                \$ECR_REPO:latest
+                \$ECR_REPO:\$IMAGE_TAG
             else
               echo "Deploying PROD container..."
               docker rm -f level1-app || true
@@ -110,7 +123,7 @@ jobs:
                 --name level1-app \
                 --restart always \
                 -p 80:3000 \
-                \$ECR_REPO:latest
+                \$ECR_REPO:\$IMAGE_TAG
             fi
 
             docker image prune -f
