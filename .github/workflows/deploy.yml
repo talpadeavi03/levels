@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:   # ✅ Added manual trigger
 
 jobs:
   deploy:
@@ -13,25 +14,21 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ✅ Setup SSH Agent (better than echoing key)
+      # ✅ Setup SSH Agent
       - name: Setup SSH agent
         uses: webfactory/ssh-agent@v0.8.0
         with:
           ssh-private-key: ${{ secrets.EC2_SSH_KEY }}
 
-      # ✅ Add EC2 host to known_hosts
-      - name: Add server to known_hosts
-        run: |
-          mkdir -p ~/.ssh
-          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+      # ❌ Removed ssh-keyscan step (can fail in CI)
 
       # 🚀 Deploy
       - name: Deploy to EC2
         run: |
-          ssh -o StrictHostKeyChecking=yes ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << EOF
+          ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << EOF
             set -e
 
-            cd levels
+            cd levels || exit 1
 
             git pull origin main
 
