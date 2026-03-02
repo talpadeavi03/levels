@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Checkout code
+      # Checkout repository
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -23,14 +23,15 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      # Login to Amazon ECR (CI side)
+      # Login to Amazon ECR (CI side) - FIXED
       - name: Login to Amazon ECR
         run: |
+          REGISTRY=$(echo $ECR_REPOSITORY | cut -d'/' -f1)
           aws ecr get-login-password --region $AWS_REGION | \
-          docker login --username AWS --password-stdin $ECR_REGISTRY
+          docker login --username AWS --password-stdin $REGISTRY
         env:
           AWS_REGION: ${{ secrets.AWS_REGION }}
-          ECR_REGISTRY: ${{ secrets.ECR_REPOSITORY }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
 
       # Build Docker image
       - name: Build Docker image
@@ -60,17 +61,18 @@ jobs:
       # Deploy on EC2 (Pull image from ECR)
       - name: Deploy to EC2
         run: |
-          ssh -o StrictHostKeyChecking=no ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'EOF'
+          ssh -o StrictHostKeyChecking=no ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << EOF
             set -e
 
             ECR_REPO="${{ secrets.ECR_REPOSITORY }}"
+            REGISTRY=\$(echo \$ECR_REPO | cut -d'/' -f1)
 
             echo "Logging into ECR from EC2..."
             aws ecr get-login-password --region ap-south-1 | \
-            docker login --username AWS --password-stdin $(echo $ECR_REPO | cut -d'/' -f1)
+            docker login --username AWS --password-stdin \$REGISTRY
 
             echo "Pulling latest image from ECR..."
-            docker pull $ECR_REPO:latest
+            docker pull \$ECR_REPO:latest
 
             echo "Removing old container if exists..."
             docker rm -f level1-app || true
@@ -80,7 +82,7 @@ jobs:
               --name level1-app \
               --restart always \
               -p 80:3000 \
-              $ECR_REPO:latest
+              \$ECR_REPO:latest
 
             echo "Cleaning unused images..."
             docker image prune -f
