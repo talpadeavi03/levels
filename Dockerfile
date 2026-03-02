@@ -1,29 +1,28 @@
-# ---- Base Image ----
-FROM node:20.11.1-alpine
-
-# Create non-root user
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+# -------- Stage 1: Build --------
+FROM node:20-bookworm-slim AS builder
 
 WORKDIR /app
 
-# Copy only package files first (layer caching)
 COPY package*.json ./
-
-# Install production dependencies
 RUN npm ci --only=production
 
-# Copy application source
 COPY . .
 
-# Change ownership
-RUN chown -R appuser:appgroup /app
+# -------- Stage 2: Runtime --------
+FROM node:20-bookworm-slim
 
-# Switch to non-root user
+WORKDIR /app
+
+# Create non-root user
+RUN useradd -m appuser
+
+COPY --from=builder /app /app
+
 USER appuser
-
-EXPOSE 3000
 
 ENV NODE_ENV=production
 ENV ENVIRONMENT=production
+
+EXPOSE 3000
 
 CMD ["node", "index.js"]
