@@ -1,4 +1,6 @@
 
+##always change ip address for secret key for workflow##
+
 ##List Instances
 aws ec2 describe-instances \
   --query "Reservations[].Instances[].InstanceId"
@@ -25,3 +27,4 @@ aws ec2 describe-instances \
   aws ec2 describe-instances \
   --instance-ids $INSTANCE_ID \
   --query "Reservations[].Instances[].PublicIpAddress"
+
