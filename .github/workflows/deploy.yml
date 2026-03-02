@@ -11,12 +11,16 @@ jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
 
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+
     steps:
-      # Checkout repository
+      # 1️⃣ Checkout code
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Configure AWS credentials
+      # 2️⃣ Configure AWS credentials
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -24,68 +28,61 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      # Login to Amazon ECR
+      # 3️⃣ Login to Amazon ECR (CI side)
       - name: Login to Amazon ECR
         run: |
-          REGISTRY=$(echo $ECR_REPOSITORY | cut -d'/' -f1)
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          REGISTRY=$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+
           aws ecr get-login-password --region $AWS_REGION | \
           docker login --username AWS --password-stdin $REGISTRY
-        env:
-          AWS_REGION: ${{ secrets.AWS_REGION }}
-          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
 
-      # Set image tag (commit SHA short)
+      # 4️⃣ Generate image tag (short commit SHA)
       - name: Set image tag
         run: echo "IMAGE_TAG=$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_ENV
 
-      # Build image
+      # 5️⃣ Build Docker image
       - name: Build Docker image
         run: docker build -t level2-node-app:$IMAGE_TAG .
 
-      # Tag commit version
-      - name: Tag Docker image (commit)
+      # 6️⃣ Tag image with commit SHA
+      - name: Tag image (commit)
         run: docker tag level2-node-app:$IMAGE_TAG $ECR_REPOSITORY:$IMAGE_TAG
-        env:
-          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
 
-      # Tag latest
-      - name: Tag Docker image (latest)
+      # 7️⃣ Tag image as latest
+      - name: Tag image (latest)
         run: docker tag level2-node-app:$IMAGE_TAG $ECR_REPOSITORY:latest
-        env:
-          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
 
-      # Push commit tag
+      # 8️⃣ Push commit tag
       - name: Push commit tag
         run: docker push $ECR_REPOSITORY:$IMAGE_TAG
-        env:
-          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
 
-      # Push latest tag
+      # 9️⃣ Push latest tag
       - name: Push latest tag
         run: docker push $ECR_REPOSITORY:latest
-        env:
-          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
 
-      # Setup SSH agent
+      # 🔟 Setup SSH agent
       - name: Setup SSH agent
         uses: webfactory/ssh-agent@v0.8.0
         with:
           ssh-private-key: ${{ secrets.EC2_SSH_KEY }}
 
-      # Branch-aware deployment
+      # 1️⃣1️⃣ Branch-aware deployment
       - name: Deploy to EC2
         run: |
-          ssh -o StrictHostKeyChecking=no ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << EOF
+          ssh -o StrictHostKeyChecking=no \
+          ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << EOF
             set -e
 
-            ECR_REPO="${{ secrets.ECR_REPOSITORY }}"
+            AWS_REGION=${AWS_REGION}
+            ECR_REPO="${ECR_REPOSITORY}"
             REGISTRY=\$(echo \$ECR_REPO | cut -d'/' -f1)
 
-            echo "Logging into ECR..."
-            aws ecr get-login-password --region ap-south-1 | \
+            echo "Logging into ECR from EC2..."
+            aws ecr get-login-password --region \$AWS_REGION | \
             docker login --username AWS --password-stdin \$REGISTRY
 
-            echo "Pulling image..."
+            echo "Pulling latest image..."
             docker pull \$ECR_REPO:latest
 
             if [ "${{ github.ref_name }}" = "dev" ]; then
@@ -107,5 +104,5 @@ jobs:
             fi
 
             docker image prune -f
-            echo "Deployment completed."
+            echo "Deployment completed successfully."
           EOF
