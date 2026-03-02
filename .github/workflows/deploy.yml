@@ -1,4 +1,4 @@
-name: Deploy to EC2
+name: Level2 - Build and Deploy via ECR
 
 on:
   push:
@@ -7,45 +7,78 @@ on:
   workflow_dispatch:
 
 jobs:
-  deploy:
+  build-and-deploy:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # Configure AWS credentials
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # Login to ECR
+      - name: Login to Amazon ECR
+        run: |
+          aws ecr get-login-password --region $AWS_REGION | \
+          docker login --username AWS --password-stdin $ECR_REPOSITORY
+
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+
+      # Build Docker image
+      - name: Build Docker image
+        run: |
+          docker build -t level2-node-app:latest .
+
+      # Tag image for ECR
+      - name: Tag Docker image
+        run: |
+          docker tag level2-node-app:latest $ECR_REPOSITORY:latest
+        env:
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+
+      # Push image to ECR
+      - name: Push Docker image
+        run: |
+          docker push $ECR_REPOSITORY:latest
+        env:
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+
+      # Setup SSH agent
       - name: Setup SSH agent
         uses: webfactory/ssh-agent@v0.8.0
         with:
           ssh-private-key: ${{ secrets.EC2_SSH_KEY }}
 
+      # Deploy on EC2 (Pull from ECR)
       - name: Deploy to EC2
         run: |
-          ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'EOF'
+          ssh -o StrictHostKeyChecking=no ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'EOF'
             set -e
 
-            echo "Navigating to project directory..."
-            cd levels
+            echo "Logging into ECR from EC2..."
+            aws ecr get-login-password --region ap-south-1 | \
+            docker login --username AWS --password-stdin 370292660341.dkr.ecr.ap-south-1.amazonaws.com
 
-            echo "Pulling latest code..."
-            git pull origin main
+            echo "Pulling latest image..."
+            docker pull 370292660341.dkr.ecr.ap-south-1.amazonaws.com/level2-node-app:latest
 
             echo "Stopping old container..."
-            docker stop level1-app || true
-            docker -f rm level1-app || true
+            docker rm -f level1-app || true
 
-            echo "Building new Docker image..."
-            docker build -t level1-node-app:latest .
-
-            echo "Starting new container..."
+            echo "Starting new container from ECR image..."
             docker run -d \
               --name level1-app \
               --restart always \
               -p 80:3000 \
-              level1-node-app:latest
+              370292660341.dkr.ecr.ap-south-1.amazonaws.com/level2-node-app:latest
 
-            echo "Cleaning unused Docker images..."
-            docker image prune -f
-
-            echo "Deployment completed successfully."
+            echo "Deployment complete."
           EOF
