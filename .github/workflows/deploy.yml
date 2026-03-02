@@ -1,9 +1,10 @@
-name: Level2 - Build and Deploy via ECR
+name: Level2 - Branch Aware Deploy (Single EC2)
 
 on:
   push:
     branches:
       - main
+      - dev
   workflow_dispatch:
 
 jobs:
@@ -15,20 +16,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Configure AWS credentials for CI
+      # Configure AWS credentials
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
-      
-      - name: Debug ECR secret
-        run: echo "ECR_REPOSITORY is set"
-        env:
-         ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
 
-      # Login to Amazon ECR (CI side) - FIXED
+      # Login to Amazon ECR
       - name: Login to Amazon ECR
         run: |
           REGISTRY=$(echo $ECR_REPOSITORY | cut -d'/' -f1)
@@ -38,21 +34,21 @@ jobs:
           AWS_REGION: ${{ secrets.AWS_REGION }}
           ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
 
-            # Set image tag based on commit SHA
+      # Set image tag (commit SHA short)
       - name: Set image tag
-        run: echo "IMAGE_TAG=${GITHUB_SHA::7}" >> $GITHUB_ENV
+        run: echo "IMAGE_TAG=$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_ENV
 
-      # Build Docker image
+      # Build image
       - name: Build Docker image
         run: docker build -t level2-node-app:$IMAGE_TAG .
 
-      # Tag image for ECR (commit tag)
+      # Tag commit version
       - name: Tag Docker image (commit)
         run: docker tag level2-node-app:$IMAGE_TAG $ECR_REPOSITORY:$IMAGE_TAG
         env:
           ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
 
-      # Tag image as latest
+      # Tag latest
       - name: Tag Docker image (latest)
         run: docker tag level2-node-app:$IMAGE_TAG $ECR_REPOSITORY:latest
         env:
@@ -70,13 +66,13 @@ jobs:
         env:
           ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
 
-      # Setup SSH agent for EC2 access
+      # Setup SSH agent
       - name: Setup SSH agent
         uses: webfactory/ssh-agent@v0.8.0
         with:
           ssh-private-key: ${{ secrets.EC2_SSH_KEY }}
 
-      # Deploy on EC2 (Pull image from ECR)
+      # Branch-aware deployment
       - name: Deploy to EC2
         run: |
           ssh -o StrictHostKeyChecking=no ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << EOF
@@ -85,25 +81,31 @@ jobs:
             ECR_REPO="${{ secrets.ECR_REPOSITORY }}"
             REGISTRY=\$(echo \$ECR_REPO | cut -d'/' -f1)
 
-            echo "Logging into ECR from EC2..."
+            echo "Logging into ECR..."
             aws ecr get-login-password --region ap-south-1 | \
             docker login --username AWS --password-stdin \$REGISTRY
 
-            echo "Pulling latest image from ECR..."
+            echo "Pulling image..."
             docker pull \$ECR_REPO:latest
 
-            echo "Removing old container if exists..."
-            docker rm -f level1-app || true
+            if [ "${{ github.ref_name }}" = "dev" ]; then
+              echo "Deploying DEV container..."
+              docker rm -f level1-dev || true
+              docker run -d \
+                --name level1-dev \
+                --restart always \
+                -p 3001:3000 \
+                \$ECR_REPO:latest
+            else
+              echo "Deploying PROD container..."
+              docker rm -f level1-app || true
+              docker run -d \
+                --name level1-app \
+                --restart always \
+                -p 80:3000 \
+                \$ECR_REPO:latest
+            fi
 
-            echo "Starting new container..."
-            docker run -d \
-              --name level1-app \
-              --restart always \
-              -p 80:3000 \
-              \$ECR_REPO:latest
-
-            echo "Cleaning unused images..."
             docker image prune -f
-
-            echo "Deployment completed successfully."
+            echo "Deployment completed."
           EOF
